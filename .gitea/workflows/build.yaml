@@ -1,0 +1,12 @@
+name: build-image
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    uses: reeds/ci-pipelines/.gitea/workflows/build-go.yml@main
+    with:
+      image: reeds/email-sync
+    secrets: inherit

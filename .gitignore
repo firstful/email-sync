@@ -1,0 +1,4 @@
+/email-sync
+*.db
+*.db-wal
+*.db-shm
