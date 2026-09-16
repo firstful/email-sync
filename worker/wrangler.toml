@@ -1,0 +1,6 @@
+name = "email-ingest"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+QUARANTINE_FORWARD = "reedsut@gmail.com"
