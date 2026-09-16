@@ -12,17 +12,17 @@ import (
 
 // Message is a synced email envelope + raw payload reference.
 type Message struct {
-	UID        uint32
-	Folder     string
-	MessageID  string
-	FromAddr   string
-	FromName   string
-	To         string
-	Subject    string
-	Date       time.Time
-	Seen       bool
-	Raw        []byte
-	StoredAt   time.Time
+	UID       uint32
+	Folder    string
+	MessageID string
+	FromAddr  string
+	FromName  string
+	To        string
+	Subject   string
+	Date      time.Time
+	Seen      bool
+	Raw       []byte
+	StoredAt  time.Time
 }
 
 type Store struct {
@@ -98,13 +98,13 @@ func (s *Store) UnseenCount(folder string) (int, error) {
 }
 
 type Envelope struct {
-	UID      uint32 `json:"uid"`
-	Folder   string `json:"folder"`
-	From     string `json:"from"`
-	Subject  string `json:"subject"`
-	Date     string `json:"date"`
-	Seen     bool   `json:"seen"`
-	Size     int    `json:"size"`
+	UID     uint32 `json:"uid"`
+	Folder  string `json:"folder"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Date    string `json:"date"`
+	Seen    bool   `json:"seen"`
+	Size    int    `json:"size"`
 }
 
 func rowToEnvelope(rows *sql.Rows) (Envelope, error) {

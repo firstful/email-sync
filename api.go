@@ -13,6 +13,7 @@ import (
 type Server struct {
 	store  *Store
 	syncer *Syncer
+	rules  *RuleEngine
 }
 
 func (s *Server) routes() *http.ServeMux {
@@ -21,6 +22,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/mail", s.handleMail)
 	mux.HandleFunc("/mail/", s.handleMailByUID)
 	mux.HandleFunc("/sync", s.handleSync)
+	mux.HandleFunc("/ingest", s.handleIngest)
 	return mux
 }
 
@@ -57,8 +59,8 @@ func (s *Server) handleMail(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var (
-		env  []Envelope
-		err  error
+		env []Envelope
+		err error
 	)
 	if sq := strings.TrimSpace(q.Get("search")); sq != "" {
 		env, err = s.store.Search(ctx, folder, sq, limit)

@@ -44,6 +44,16 @@ func main() {
 		os.Getenv("IMAP_USERNAME"), pass, interval, maxFetch)
 	srv := &Server{store: store, syncer: syncer}
 
+	// Rule engine: declarative rules that trigger Hermes sessions on ingest.
+	engine := NewRuleEngine(
+		getenv("HERMES_WEBHOOK_URL", ""),
+		os.Getenv("HERMES_WEBHOOK_TOKEN"),
+	)
+	if err := engine.LoadRules(getenv("RULES_PATH", "/config/rules.yaml")); err != nil {
+		log.Printf("WARN: rules not loaded: %v", err)
+	}
+	srv.rules = engine
+
 	// Background sync loop.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

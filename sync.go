@@ -141,8 +141,8 @@ func (s *Syncer) Sync(ctx context.Context, folder string) error {
 
 func convert(msg *imap.Message, folder string) (*Message, error) {
 	m := &Message{
-		UID:     msg.Uid,
-		Folder:  folder,
+		UID:      msg.Uid,
+		Folder:   folder,
 		StoredAt: time.Now().UTC(),
 	}
 	if msg.Envelope != nil {
