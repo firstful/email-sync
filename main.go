@@ -42,7 +42,8 @@ func main() {
 
 	syncer := NewSyncer(store, host, getenv("IMAP_PORT", "993"),
 		os.Getenv("IMAP_USERNAME"), pass, interval, maxFetch)
-	srv := &Server{store: store, syncer: syncer}
+	forwarder := NewForwarder()
+	srv := &Server{store: store, syncer: syncer, forwarder: forwarder}
 
 	// Rule engine: declarative rules that trigger Hermes sessions on ingest.
 	engine := NewRuleEngine(

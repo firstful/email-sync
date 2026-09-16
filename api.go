@@ -11,9 +11,10 @@ import (
 )
 
 type Server struct {
-	store  *Store
-	syncer *Syncer
-	rules  *RuleEngine
+	store     *Store
+	syncer    *Syncer
+	rules     *RuleEngine
+	forwarder *Forwarder
 }
 
 func (s *Server) routes() *http.ServeMux {

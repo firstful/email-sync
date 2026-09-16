@@ -96,6 +96,8 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if s.rules != nil {
 		s.rules.Dispatch(m)
 	}
+	// Best-effort SMTP forward for whitelisted recipients.
+	s.forwarder.MaybeForward(m)
 	writeJSON(w, 200, map[string]any{"ok": true, "id": m.UID, "folder": m.Folder})
 }
 
