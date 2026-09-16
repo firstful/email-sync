@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -145,10 +146,9 @@ func (c *compiledRule) matches(m *Message) bool {
 }
 
 // triggerPayload is deliberately metadata-only — no raw email content.
+// Shape matches the Hermes API server runs API (POST /p/<profile>/v1/runs).
 type triggerPayload struct {
-	Platform string `json:"platform"`
-	Chat     string `json:"chat"`
-	Message  string `json:"message"`
+	Input string `json:"input"`
 }
 
 func (e *RuleEngine) fire(cr compiledRule, m *Message) {
@@ -164,12 +164,14 @@ func (e *RuleEngine) fire(cr compiledRule, m *Message) {
 		return
 	}
 	payload := triggerPayload{
-		Platform: "webhook",
-		Chat:     "default",
-		Message:  fmt.Sprintf("[inbound email #%d from %s subject %q] %s", m.UID, data.From, data.Subject, buf.String()),
+		Input: fmt.Sprintf("[inbound email #%d from %s subject %q] %s", m.UID, data.From, data.Subject, buf.String()),
 	}
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, e.webhook, bytes.NewReader(body))
+	url := strings.TrimRight(e.webhook, "/") + "/v1/runs"
+	if p := cr.rule.Action.Profile; p != "" && p != "default" {
+		url = strings.TrimRight(e.webhook, "/") + "/p/" + p + "/v1/runs"
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
