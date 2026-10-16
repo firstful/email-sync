@@ -24,6 +24,9 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 	defer store.Close()
+	if err := store.BackfillAttachments(context.Background()); err != nil {
+		log.Printf("WARN: backfill attachments: %v", err)
+	}
 
 	host := os.Getenv("IMAP_HOST")
 	pass := os.Getenv("IMAP_PASSWORD")

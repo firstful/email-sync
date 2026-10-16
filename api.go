@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/mail/", s.handleMailByUID)
 	mux.HandleFunc("/sync", s.handleSync)
 	mux.HandleFunc("/ingest", s.handleIngest)
+	mux.HandleFunc("/audit/body-access", s.handleBodyAccessAudit)
 	return mux
 }
 
@@ -84,16 +86,19 @@ func (s *Server) handleMail(w http.ResponseWriter, r *http.Request) {
 			out = append(out, row)
 		}
 		writeJSON(w, 200, out)
+		s.auditBodyAccess(r, folder, 0, "/mail", r.URL.RawQuery, "bulk_raw_list", 200)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"folder": folder, "count": len(env), "messages": env})
 }
 
 func (s *Server) handleMailByUID(w http.ResponseWriter, r *http.Request) {
-	// /mail/{uid}?folder=INBOX
+	// /mail/{uid}?folder=INBOX  (metadata by default)
+	// /mail/{uid}/body            (raw RFC822; audited)
+	// /mail/{uid}?raw=1|body=1   (raw RFC822; audited)
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 2 {
-		writeJSON(w, 400, map[string]any{"error": "usage: /mail/{uid}?folder=INBOX"})
+	if len(parts) < 2 || len(parts) > 3 {
+		writeJSON(w, 400, map[string]any{"error": "usage: /mail/{uid}[ /body]?folder=INBOX"})
 		return
 	}
 	uid, err := strconv.ParseUint(parts[1], 10, 32)
@@ -116,15 +121,43 @@ func (s *Server) handleMailByUID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "not found"})
 		return
 	}
-	if r.URL.Query().Get("raw") == "1" {
+
+	bodyMode := false
+	if len(parts) == 3 && parts[2] == "body" {
+		bodyMode = true
+	}
+	if r.URL.Query().Get("raw") == "1" || r.URL.Query().Get("body") == "1" {
+		bodyMode = true
+	}
+
+	if bodyMode {
 		w.Header().Set("Content-Type", "message/rfc822")
 		if m.Subject != "" {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%d.eml", m.UID))
 		}
 		w.Write(m.Raw)
+		s.auditBodyAccess(r, folder, uint32(uid), r.URL.Path, r.URL.RawQuery, "body_read", 200)
 		return
 	}
-	writeJSON(w, 200, m)
+
+	// Metadata-only response by default: no raw body. Attachment metadata parsed.
+	atts := parseAttachments(m.Raw)
+	resp := map[string]any{
+		"uid":              m.UID,
+		"folder":           m.Folder,
+		"message_id":       m.MessageID,
+		"from_addr":        m.FromAddr,
+		"from_name":        m.FromName,
+		"to_addr":          m.To,
+		"subject":          m.Subject,
+		"date":             m.Date,
+		"seen":             m.Seen,
+		"stored_at":        m.StoredAt,
+		"size":             len(m.Raw),
+		"attachment_count": len(atts),
+		"attachments":      atts,
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -141,4 +174,45 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	n, _ := s.store.Count("INBOX")
 	u, _ := s.store.UnseenCount("INBOX")
 	writeJSON(w, 200, map[string]any{"ok": true, "inbox": n, "unseen": u})
+}
+
+func (s *Server) handleBodyAccessAudit(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	entries, err := s.store.ListBodyAccess(limit)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"count": len(entries), "entries": entries})
+}
+
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	return r.RemoteAddr
+}
+
+func (s *Server) auditBodyAccess(r *http.Request, folder string, uid uint32, path, query, outcome string, status int) {
+	entry := BodyAccessEntry{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Folder:    folder,
+		UID:       uid,
+		Method:    r.Method,
+		Path:      path,
+		Query:     query,
+		SourceIP:  clientIP(r),
+		UserAgent: r.UserAgent(),
+		Reason:    r.Header.Get("X-Audit-Reason"),
+		Outcome:   outcome,
+		Status:    status,
+	}
+	log.Printf("AUDIT body-access folder=%s uid=%d path=%s ip=%s ua=%q reason=%q outcome=%s", folder, uid, path, entry.SourceIP, entry.UserAgent, entry.Reason, outcome)
+	_ = s.store.LogBodyAccess(entry)
 }

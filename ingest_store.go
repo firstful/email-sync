@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -29,11 +30,13 @@ func (s *Store) InsertIngest(m *Message) error {
 		return err
 	}
 	m.UID = uid
+	atts := parseAttachments(m.Raw)
+	attJSON, _ := json.Marshal(atts)
 	_, err = s.db.Exec(`
-INSERT INTO messages (uid, folder, message_id, from_addr, from_name, to_addr, subject, date, seen, raw, stored_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+INSERT INTO messages (uid, folder, message_id, from_addr, from_name, to_addr, subject, date, seen, raw, stored_at, attachments, attachment_count)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.UID, m.Folder, m.MessageID, m.FromAddr, m.FromName, m.To, m.Subject,
-		m.Date.UTC().Format(time.RFC3339), btoi(m.Seen), m.Raw, m.StoredAt.UTC().Format(time.RFC3339))
+		m.Date.UTC().Format(time.RFC3339), btoi(m.Seen), m.Raw, m.StoredAt.UTC().Format(time.RFC3339), string(attJSON), len(atts))
 	return err
 }
 
