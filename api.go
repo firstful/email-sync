@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +53,13 @@ func (s *Server) handleMail(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := 50
 	if l := q.Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			// Clamp instead of silently falling back to the default: a caller
+			// asking for 1000 used to get 50 (same failure class as a missing
+			// field — silently less than requested).
+			if n > 500 {
+				n = 500
+			}
 			limit = n
 		}
 	}
@@ -76,20 +83,113 @@ func (s *Server) handleMail(w http.ResponseWriter, r *http.Request) {
 	}
 	// Accept ?raw=1 to return raw bodies inline (pairs with ?search).
 	if q.Get("raw") == "1" {
-		out := make([]map[string]any, 0, len(env))
-		for _, e := range env {
-			m, _ := s.store.Get(ctx, e.Folder, e.UID)
-			row := map[string]any{"uid": e.UID, "folder": e.Folder, "from": e.From, "subject": e.Subject, "date": e.Date, "seen": e.Seen}
-			if m != nil {
-				row["raw"] = string(m.Raw)
-			}
-			out = append(out, row)
-		}
-		writeJSON(w, 200, out)
+		s.writeBulkRaw(w, r, env)
 		s.auditBodyAccess(r, folder, 0, "/mail", r.URL.RawQuery, "bulk_raw_list", 200)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"folder": folder, "count": len(env), "messages": env})
+}
+
+// defaultMaxRawBytes caps the raw payload served by a single bulk ?raw=1
+// request (64 MiB). Override with MAX_RAW_BYTES. The cap exists so a growing
+// store can never produce a multi-hundred-MB response — the previous
+// implementation buffered every body AND then marshalled the whole slice
+// into a second buffer, which OOMKilled the 256Mi pod (exit 137).
+const defaultMaxRawBytes = 64 * 1024 * 1024
+
+func maxRawBytes() int64 {
+	v := os.Getenv("MAX_RAW_BYTES")
+	if v == "" {
+		return defaultMaxRawBytes
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("WARN: invalid MAX_RAW_BYTES=%q, using default %d", v, defaultMaxRawBytes)
+		return defaultMaxRawBytes
+	}
+	return n
+}
+
+// writeBulkRaw streams the bulk ?raw=1 response: a bare JSON array whose
+// elements carry uid, folder, from, subject, date, seen, raw. Each row is
+// encoded and written one at a time, so only ONE message body is resident in
+// memory at any moment. If the raw byte cap is reached the array is closed
+// cleanly (valid JSON, fewer elements) — never truncated, never a 500.
+func (s *Server) writeBulkRaw(w http.ResponseWriter, r *http.Request, env []Envelope) {
+	limit := maxRawBytes()
+
+	// The envelope list used a 10s timeout; streaming a large payload needs a
+	// longer budget for the per-message reads.
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+
+	var (
+		served   int64
+		included int
+		skipped  int
+		capped   bool
+	)
+
+	_, _ = w.Write([]byte("["))
+	for _, e := range env {
+		if included > 0 && served >= limit {
+			capped = true
+			skipped = len(env) - included
+			break
+		}
+		m, err := s.store.Get(ctx, e.Folder, e.UID)
+		if err != nil {
+			log.Printf("bulk raw: get folder=%s uid=%d: %v", e.Folder, e.UID, err)
+			break
+		}
+		raw := ""
+		rawLen := 0
+		if m != nil {
+			raw = string(m.Raw)
+			rawLen = len(m.Raw)
+			if included > 0 && served+int64(rawLen) > limit {
+				capped = true
+				skipped = len(env) - included
+				break
+			}
+		}
+		row := map[string]any{
+			"uid":     e.UID,
+			"folder":  e.Folder,
+			"from":    e.From,
+			"subject": e.Subject,
+			"date":    e.Date,
+			"seen":    e.Seen,
+			"raw":     raw,
+		}
+		buf, err := json.Marshal(row)
+		if err != nil {
+			log.Printf("bulk raw: marshal uid=%d: %v", e.UID, err)
+			break
+		}
+		if included > 0 {
+			if _, err := w.Write([]byte(",")); err != nil {
+				break
+			}
+		}
+		if _, err := w.Write(buf); err != nil {
+			break
+		}
+		served += int64(rawLen)
+		included++
+	}
+	_, _ = w.Write([]byte("]"))
+	_, _ = w.Write([]byte("\n"))
+	if capped {
+		log.Printf("bulk raw: MAX_RAW_BYTES cap %d reached — included %d message(s), skipped %d, served %d raw bytes",
+			limit, included, skipped, served)
+	} else {
+		log.Printf("bulk raw: included %d message(s), served %d raw bytes (cap %d)",
+			included, served, limit)
+	}
 }
 
 func (s *Server) handleMailByUID(w http.ResponseWriter, r *http.Request) {
