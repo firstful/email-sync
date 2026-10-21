@@ -15,6 +15,7 @@ import (
 type Message struct {
 	UID       uint32
 	Folder    string
+	GUID      string
 	MessageID string
 	FromAddr  string
 	FromName  string
@@ -94,6 +95,14 @@ CREATE INDEX IF NOT EXISTS idx_body_access_ts ON body_access_log(ts DESC);
 		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN attachment_count INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+	}
+	if !s.hasColumn("messages", "guid") {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN guid TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_guid ON messages(guid) WHERE guid <> ''`); err != nil {
+		return err
 	}
 	return nil
 }

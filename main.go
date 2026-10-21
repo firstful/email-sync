@@ -63,6 +63,15 @@ func main() {
 	defer cancel()
 	go syncer.Run(ctx)
 
+	// Cloudflare R2 + Queue drainer (durable inbound path).
+	r2 := NewR2Client()
+	queue := NewQueueClient()
+	if r2 != nil || queue != nil {
+		log.Printf("drainer: r2=%v queue=%v", r2 != nil, queue != nil)
+		drainer := NewDrainer(store, engine, r2, queue)
+		go drainer.Run(ctx)
+	}
+
 	s := &http.Server{
 		Addr:              ":" + port,
 		Handler:           srv.routes(),

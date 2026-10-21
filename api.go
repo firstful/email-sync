@@ -37,11 +37,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	n, err := s.store.Count("INBOX")
+	n, err := s.store.Count("INGEST")
 	if err != nil {
 		n = -1
 	}
-	u, _ := s.store.UnseenCount("INBOX")
+	u, _ := s.store.UnseenCount("INGEST")
 	writeJSON(w, 200, map[string]any{"ok": true, "inbox": n, "unseen": u, "time": time.Now().UTC().Format(time.RFC3339)})
 }
 

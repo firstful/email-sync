@@ -22,6 +22,31 @@ const IngestMaxBytes = 4 << 20 // 4 MiB — CF Email Routing itself caps lower
 // Dedup: X-Message-ID (or parsed Message-ID) — duplicate POSTs are no-ops.
 // Storage: folder="INGEST", uid = monotonically increasing synthetic id.
 // After store, the rule engine is notified (metadata only — never raw content).
+// parseRawMIME turns a raw RFC822 message into a stored Message (INGEST folder).
+func parseRawMIME(raw []byte) (*Message, error) {
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		return nil, err
+	}
+	m := &Message{Folder: "INGEST", StoredAt: time.Now().UTC(), Raw: raw}
+	m.MessageID = msg.Header.Get("Message-ID")
+	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
+		m.FromAddr = addr.Address
+		m.FromName = addr.Name
+	}
+	if addr, err := mail.ParseAddress(msg.Header.Get("To")); err == nil {
+		m.To = addr.Address
+	}
+	m.Subject = decodeHeader(msg.Header.Get("Subject"))
+	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
+		m.Date = d
+	} else {
+		m.Date = time.Now().UTC()
+	}
+	m.Seen = false
+	return m, nil
+}
+
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "POST required"})
@@ -50,30 +75,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := mail.ReadMessage(strings.NewReader(string(body)))
+	m, err := parseRawMIME(body)
 	if err != nil {
 		writeJSON(w, 422, map[string]any{"error": "not parseable RFC822: " + err.Error()})
 		return
 	}
-
-	m := &Message{Folder: "INGEST", StoredAt: time.Now().UTC()}
-	m.MessageID = r.Header.Get("X-Message-ID")
-	if m.MessageID == "" {
-		m.MessageID = msg.Header.Get("Message-ID")
-	}
-	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
-		m.FromAddr = addr.Address
-		m.FromName = addr.Name
-	}
-	if addr, err := mail.ParseAddress(msg.Header.Get("To")); err == nil {
-		m.To = addr.Address
-	}
-	m.Subject = decodeHeader(msg.Header.Get("Subject"))
-	m.Raw = body
-	if d, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
-		m.Date = d
-	} else {
-		m.Date = time.Now().UTC()
+	if xm := r.Header.Get("X-Message-ID"); xm != "" {
+		m.MessageID = xm
 	}
 	// Ingested mail is unseen by definition.
 	m.Seen = false

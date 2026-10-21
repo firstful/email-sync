@@ -1,6 +1,11 @@
-name = "email-ingest"
+name = "email-ingest-worker"
 main = "worker.js"
-compatibility_date = "2026-09-01"
+compatibility_date = "2024-09-01"
 
-[vars]
-QUARANTINE_FORWARD = "reedsut@gmail.com"
+[[r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "ffilt-us-email-raw"
+
+[[queues.producers]]
+binding = "EMAIL_QUEUE"
+queue = "email-ingest-queue"
