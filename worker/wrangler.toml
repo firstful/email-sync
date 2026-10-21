@@ -4,10 +4,9 @@ compatibility_date = "2024-09-01"
 # Email-triggered worker: no HTTP route, no workers.dev subdomain needed.
 workers_dev = false
 
-[[d1_databases]]
-binding = "DB"
-database_name = "email-raw"
-database_id = "8fca9a3d-2f46-4c08-a773-46d8e53528b3"
+[[r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "ffilt-us-email-raw"
 
 [[queues.producers]]
 binding = "EMAIL_QUEUE"

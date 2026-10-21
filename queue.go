@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -38,7 +39,7 @@ func NewQueueClient() *QueueClient {
 
 func (q *QueueClient) Enabled() bool { return q != nil }
 
-// queueMessage is one pulled message. Note: the API returns `body` as a JSON
+// queueMessage is one pulled message. The API returns `body` as a JSON
 // *string* containing our JSON object — not as a nested object.
 type queueMessage struct {
 	ID      string `json:"id"`
@@ -65,7 +66,7 @@ func (q *QueueClient) Pull(ctx context.Context, batchSize int) ([]queueMessage, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := readAllLimit(resp)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("queue pull: %d %s", resp.StatusCode, raw)
 	}
@@ -74,7 +75,7 @@ func (q *QueueClient) Pull(ctx context.Context, batchSize int) ([]queueMessage, 
 			Messages []queueMessage `json:"messages"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, fmt.Errorf("queue pull parse: %w", err)
 	}
 	return parsed.Result.Messages, nil
@@ -141,32 +142,32 @@ func parseEnvelope(body string) (QueuedEnvelope, error) {
 	return env, nil
 }
 
-// Drainer orchestrates: pull queue -> fetch blob -> store -> rules -> cleanup -> ack.
+// Drainer orchestrates: pull queue -> fetch R2 blob -> store -> rules -> cleanup -> ack.
 type Drainer struct {
 	store    *Store
 	rules    *RuleEngine
-	d1       *D1Client
+	r2       *R2Client
 	queue    *QueueClient
 	interval time.Duration
 }
 
-func NewDrainer(store *Store, rules *RuleEngine, d1 *D1Client, queue *QueueClient) *Drainer {
+func NewDrainer(store *Store, rules *RuleEngine, r2 *R2Client, queue *QueueClient) *Drainer {
 	iv := 15 * time.Second
 	if v := os.Getenv("DRAIN_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			iv = d
 		}
 	}
-	return &Drainer{store: store, rules: rules, d1: d1, queue: queue, interval: iv}
+	return &Drainer{store: store, rules: rules, r2: r2, queue: queue, interval: iv}
 }
 
-// Run loops: boot reconciliation (D1) then periodic queue drain.
+// Run loops: boot reconciliation (R2) then periodic queue drain.
 func (d *Drainer) Run(ctx context.Context) {
-	// Boot reconciliation: process any blobs in D1 not yet in the local DB.
-	// This is the durability path — the queue's retention window is short, but
-	// D1 blobs persist, so a long homelab outage loses nothing.
-	if d.d1 != nil {
-		d.reconcileD1(ctx)
+	// Boot reconciliation: process any blobs in R2 not yet in the local DB.
+	// This is the durability path — queue messages expire, R2 objects persist,
+	// so a long homelab outage loses nothing.
+	if d.r2 != nil {
+		d.reconcileR2(ctx)
 	}
 	t := time.NewTicker(d.interval)
 	defer t.Stop()
@@ -180,16 +181,16 @@ func (d *Drainer) Run(ctx context.Context) {
 	}
 }
 
-// reconcileD1 processes leftover blobs (covers expired queue messages).
-func (d *Drainer) reconcileD1(ctx context.Context) {
-	guids, err := d.d1.ListGUIDs(ctx)
+// reconcileR2 processes leftover blobs (covers expired queue messages).
+func (d *Drainer) reconcileR2(ctx context.Context) {
+	objs, err := d.r2.ListObjects(ctx)
 	if err != nil {
-		log.Printf("drainer: d1 list failed: %v", err)
+		log.Printf("drainer: r2 list failed: %v", err)
 		return
 	}
-	log.Printf("drainer: reconciling %d d1 blob(s)", len(guids))
-	for _, g := range guids {
-		d.processGUID(ctx, g)
+	log.Printf("drainer: reconciling %d r2 object(s)", len(objs))
+	for _, o := range objs {
+		d.processKey(ctx, o.Key)
 	}
 }
 
@@ -214,7 +215,7 @@ func (d *Drainer) drainOnce(ctx context.Context) {
 			leaseIDs = append(leaseIDs, m.LeaseID) // drop it, don't retry forever
 			continue
 		}
-		d.processGUID(ctx, env.GUID)
+		d.processKey(ctx, env.GUID)
 		leaseIDs = append(leaseIDs, m.LeaseID)
 	}
 	if err := d.queue.Ack(ctx, leaseIDs); err != nil {
@@ -222,54 +223,42 @@ func (d *Drainer) drainOnce(ctx context.Context) {
 	}
 }
 
-// processGUID fetches, stores, triggers, and cleans up one message by guid.
-func (d *Drainer) processGUID(ctx context.Context, guid string) {
-	if guid == "" || d.d1 == nil {
+// processKey fetches, stores, triggers, and cleans up one message by R2 key.
+func (d *Drainer) processKey(ctx context.Context, key string) {
+	if key == "" || d.r2 == nil {
 		return
 	}
+	guid := strings.TrimSuffix(key, ".eml")
 	// Dedup: skip if already stored locally.
 	if dup, _ := d.store.HasGUID(ctx, guid); dup {
-		// Blob already ingested — clean up the staging copy.
-		if err := d.d1.DeleteBlob(ctx, guid); err != nil {
-			log.Printf("drainer: d1 delete %s: %v", guid, err)
+		// Already ingested — clean up the staging copy.
+		if err := d.r2.DeleteObject(ctx, key); err != nil {
+			log.Printf("drainer: r2 delete %s: %v", key, err)
 		}
 		return
 	}
-	raw, err := d.d1.GetBlob(ctx, guid)
+	raw, err := d.r2.FetchObject(ctx, key)
 	if err != nil {
-		log.Printf("drainer: fetch %s failed: %v", guid, err)
+		log.Printf("drainer: fetch %s failed: %v", key, err)
 		return
 	}
 	msg, err := parseRawMIME(raw)
 	if err != nil {
-		log.Printf("drainer: parse %s failed: %v", guid, err)
+		log.Printf("drainer: parse %s failed: %v", key, err)
 		return
 	}
 	if err := d.store.InsertIngestGUID(ctx, msg, guid); err != nil {
-		log.Printf("drainer: store %s failed: %v", guid, err)
+		log.Printf("drainer: store %s failed: %v", key, err)
 		return
 	}
 	// Rule engine: metadata-only dispatch (untrusted content never rides along).
 	if d.rules != nil {
 		d.rules.Dispatch(msg)
 	}
-	// Best-effort cleanup of the staging blob.
-	if err := d.d1.DeleteBlob(ctx, guid); err != nil {
-		log.Printf("drainer: d1 delete %s: %v", guid, err)
+	// Best-effort cleanup of the staging blob. If this fails the object stays
+	// in R2 and boot reconciliation will find it (and skip it as a dup).
+	if err := d.r2.DeleteObject(ctx, key); err != nil {
+		log.Printf("drainer: r2 delete %s: %v", key, err)
 	}
-	log.Printf("drainer: processed %s (uid=%d, from=%s)", guid, msg.UID, msg.FromAddr)
-}
-
-func readAllLimit(resp *http.Response) (string, error) {
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			return string(buf), nil
-		}
-	}
+	log.Printf("drainer: processed %s (uid=%d, from=%s)", key, msg.UID, msg.FromAddr)
 }
