@@ -68,7 +68,7 @@ func main() {
 	queue := NewQueueClient()
 	if r2 != nil || queue != nil {
 		log.Printf("drainer: r2=%v queue=%v", r2 != nil, queue != nil)
-		drainer := NewDrainer(store, engine, r2, queue)
+		drainer := NewDrainer(store, engine, forwarder, r2, queue)
 		go drainer.Run(ctx)
 	}
 

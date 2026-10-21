@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -142,23 +143,24 @@ func parseEnvelope(body string) (QueuedEnvelope, error) {
 	return env, nil
 }
 
-// Drainer orchestrates: pull queue -> fetch R2 blob -> store -> rules -> cleanup -> ack.
+// Drainer orchestrates: pull queue -> fetch R2 blob -> store -> rules -> forward -> cleanup -> ack.
 type Drainer struct {
-	store    *Store
-	rules    *RuleEngine
-	r2       *R2Client
-	queue    *QueueClient
-	interval time.Duration
+	store     *Store
+	rules     *RuleEngine
+	forwarder *Forwarder
+	r2        *R2Client
+	queue     *QueueClient
+	interval  time.Duration
 }
 
-func NewDrainer(store *Store, rules *RuleEngine, r2 *R2Client, queue *QueueClient) *Drainer {
+func NewDrainer(store *Store, rules *RuleEngine, forwarder *Forwarder, r2 *R2Client, queue *QueueClient) *Drainer {
 	iv := 15 * time.Second
 	if v := os.Getenv("DRAIN_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			iv = d
 		}
 	}
-	return &Drainer{store: store, rules: rules, r2: r2, queue: queue, interval: iv}
+	return &Drainer{store: store, rules: rules, forwarder: forwarder, r2: r2, queue: queue, interval: iv}
 }
 
 // Run loops: boot reconciliation (R2) then periodic queue drain.
@@ -239,6 +241,13 @@ func (d *Drainer) processKey(ctx context.Context, key string) {
 	}
 	raw, err := d.r2.FetchObject(ctx, key)
 	if err != nil {
+		var nf *R2NotFoundError
+		if errors.As(err, &nf) {
+			// Terminal: the blob is gone (already ingested and cleaned up, or
+			// the queue message outlived its object). Ack, don't retry.
+			log.Printf("drainer: %s — blob already gone, dropping", key)
+			return
+		}
 		log.Printf("drainer: fetch %s failed: %v", key, err)
 		return
 	}
@@ -255,6 +264,8 @@ func (d *Drainer) processKey(ctx context.Context, key string) {
 	if d.rules != nil {
 		d.rules.Dispatch(msg)
 	}
+	// Best-effort SMTP forward for whitelisted recipients (parity with /ingest).
+	d.forwarder.MaybeForward(msg)
 	// Best-effort cleanup of the staging blob. If this fails the object stays
 	// in R2 and boot reconciliation will find it (and skip it as a dup).
 	if err := d.r2.DeleteObject(ctx, key); err != nil {

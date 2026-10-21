@@ -85,11 +85,25 @@ func (r *R2Client) FetchObject(ctx context.Context, key string) ([]byte, error) 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &R2NotFoundError{Key: key}
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return nil, fmt.Errorf("r2 fetch %s: %d %s", key, resp.StatusCode, string(b))
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// R2NotFoundError signals the object does not exist. This is terminal for a
+// queue message: the blob was already ingested and cleaned up (or the queue
+// message outlived its object), so the message must be acked, not retried.
+type R2NotFoundError struct {
+	Key string
+}
+
+func (e *R2NotFoundError) Error() string {
+	return fmt.Sprintf("r2: object not found: %s", e.Key)
 }
 
 // DeleteObject removes an R2 object (best-effort cleanup after ingest).
