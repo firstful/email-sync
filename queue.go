@@ -192,7 +192,7 @@ func (d *Drainer) reconcileR2(ctx context.Context) {
 	}
 	log.Printf("drainer: reconciling %d r2 object(s)", len(objs))
 	for _, o := range objs {
-		d.processKey(ctx, o.Key)
+		d.processGUID(ctx, guidFromR2Key(o.Key))
 	}
 }
 
@@ -217,7 +217,7 @@ func (d *Drainer) drainOnce(ctx context.Context) {
 			leaseIDs = append(leaseIDs, m.LeaseID) // drop it, don't retry forever
 			continue
 		}
-		d.processKey(ctx, env.GUID)
+		d.processGUID(ctx, env.GUID)
 		leaseIDs = append(leaseIDs, m.LeaseID)
 	}
 	if err := d.queue.Ack(ctx, leaseIDs); err != nil {
@@ -225,12 +225,26 @@ func (d *Drainer) drainOnce(ctx context.Context) {
 	}
 }
 
-// processKey fetches, stores, triggers, and cleans up one message by R2 key.
-func (d *Drainer) processKey(ctx context.Context, key string) {
-	if key == "" || d.r2 == nil {
+// r2KeyForGUID maps a message GUID to its R2 object key.
+//
+// The worker writes "<guid>.eml"; the queue envelope carries the bare GUID.
+// Both entry points (queue drain and boot reconciliation) must agree on the
+// key, so the suffix is applied in exactly one place.
+func r2KeyForGUID(guid string) string {
+	return guid + ".eml"
+}
+
+// guidFromR2Key strips the object suffix back to the message GUID.
+func guidFromR2Key(key string) string {
+	return strings.TrimSuffix(key, ".eml")
+}
+
+// processGUID fetches, stores, triggers, and cleans up one message by GUID.
+func (d *Drainer) processGUID(ctx context.Context, guid string) {
+	if guid == "" || d.r2 == nil {
 		return
 	}
-	guid := strings.TrimSuffix(key, ".eml")
+	key := r2KeyForGUID(guid)
 	// Dedup: skip if already stored locally.
 	if dup, _ := d.store.HasGUID(ctx, guid); dup {
 		// Already ingested — clean up the staging copy.
