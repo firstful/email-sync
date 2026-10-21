@@ -128,6 +128,9 @@ func (r *R2Client) DeleteObject(ctx context.Context, key string) error {
 type R2Object struct {
 	Key  string `json:"key"`
 	Size int64  `json:"size"`
+	// LastModified is the upload timestamp, e.g. "2026-10-21T16:29:07.744Z".
+	// Used by the age-based cull to decide what has gone stale.
+	LastModified time.Time `json:"last_modified"`
 }
 
 // ListObjects returns all object keys (cursor-paginated).

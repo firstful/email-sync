@@ -151,7 +151,15 @@ type Drainer struct {
 	r2        *R2Client
 	queue     *QueueClient
 	interval  time.Duration
+	// maxAge is how long an unprocessed R2 object may live before it is
+	// culled. The bucket lifecycle rule (deleteObjectsTransition, 14d) is the
+	// primary mechanism; this is the deterministic app-side backstop so the
+	// guarantee does not depend on Cloudflare's sweep cadence.
+	maxAge time.Duration
 }
+
+// DefaultMaxAge is the age at which an unprocessed R2 staging object is culled.
+const DefaultMaxAge = 14 * 24 * time.Hour
 
 func NewDrainer(store *Store, rules *RuleEngine, forwarder *Forwarder, r2 *R2Client, queue *QueueClient) *Drainer {
 	iv := 15 * time.Second
@@ -160,7 +168,13 @@ func NewDrainer(store *Store, rules *RuleEngine, forwarder *Forwarder, r2 *R2Cli
 			iv = d
 		}
 	}
-	return &Drainer{store: store, rules: rules, forwarder: forwarder, r2: r2, queue: queue, interval: iv}
+	age := DefaultMaxAge
+	if v := os.Getenv("R2_MAX_AGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			age = d
+		}
+	}
+	return &Drainer{store: store, rules: rules, forwarder: forwarder, r2: r2, queue: queue, interval: iv, maxAge: age}
 }
 
 // Run loops: boot reconciliation (R2) then periodic queue drain.
@@ -170,16 +184,91 @@ func (d *Drainer) Run(ctx context.Context) {
 	// so a long homelab outage loses nothing.
 	if d.r2 != nil {
 		d.reconcileR2(ctx)
+		d.cullStale(ctx)
+	}
+	// Cull on a slow cadence: the bucket lifecycle rule is the primary
+	// mechanism, this is the deterministic backstop. A LIST per drain cycle
+	// would be wasteful, so it runs hourly.
+	cullEvery := time.Hour
+	if v := os.Getenv("R2_CULL_INTERVAL"); v != "" {
+		if dur, err := time.ParseDuration(v); err == nil && dur > 0 {
+			cullEvery = dur
+		}
 	}
 	t := time.NewTicker(d.interval)
 	defer t.Stop()
+	ct := time.NewTicker(cullEvery)
+	defer ct.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			d.drainOnce(ctx)
+		case <-ct.C:
+			d.cullStale(ctx)
 		}
+	}
+}
+
+// cullableObjects returns the keys of objects that are old enough to cull.
+//
+// Pure function so the age boundary is unit-testable without touching R2.
+// An object with no timestamp is never culled — we never delete blind.
+func cullableObjects(objs []R2Object, maxAge time.Duration, now time.Time) []string {
+	cutoff := now.Add(-maxAge)
+	var out []string
+	for _, o := range objs {
+		if o.LastModified.IsZero() {
+			continue
+		}
+		if o.LastModified.After(cutoff) {
+			continue
+		}
+		out = append(out, o.Key)
+	}
+	return out
+}
+
+// cullStale deletes R2 objects older than the max age.
+//
+// The bucket lifecycle rule already expires objects at 14 days, but that
+// rule is evaluated on Cloudflare's periodic sweep (documented: "within 24
+// hours of the x-amz-expiration value"). This app-side pass makes the
+// guarantee deterministic: any object that has sat unprocessed past the
+// max age is removed on the next drainer cycle, regardless of when
+// Cloudflare's sweep happens to run.
+//
+// Safety: objects are only culled if they are older than the age AND the
+// local store does not already have the GUID. An object that has been
+// ingested is cleaned up by processGUID's normal path, so reaching this
+// means the mail was never stored locally — culling it is the intended
+// "this is too old to be recovered" outcome.
+func (d *Drainer) cullStale(ctx context.Context) {
+	if d.r2 == nil {
+		return
+	}
+	objs, err := d.r2.ListObjects(ctx)
+	if err != nil {
+		log.Printf("drainer: cull list failed: %v", err)
+		return
+	}
+	n := 0
+	for _, key := range cullableObjects(objs, d.maxAge, time.Now()) {
+		guid := guidFromR2Key(key)
+		if dup, _ := d.store.HasGUID(ctx, guid); dup {
+			// Already ingested; the normal cleanup path owns this one.
+			continue
+		}
+		if err := d.r2.DeleteObject(ctx, key); err != nil {
+			log.Printf("drainer: cull %s: %v", key, err)
+			continue
+		}
+		n++
+		log.Printf("drainer: culled stale r2 object %s", key)
+	}
+	if n > 0 {
+		log.Printf("drainer: culled %d stale r2 object(s) older than %s", n, d.maxAge)
 	}
 }
 
