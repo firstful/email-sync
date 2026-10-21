@@ -63,12 +63,12 @@ func main() {
 	defer cancel()
 	go syncer.Run(ctx)
 
-	// Cloudflare R2 + Queue drainer (durable inbound path).
-	r2 := NewR2Client()
+	// Cloudflare D1 + Queue drainer (durable inbound path).
+	d1 := NewD1Client()
 	queue := NewQueueClient()
-	if r2 != nil || queue != nil {
-		log.Printf("drainer: r2=%v queue=%v", r2 != nil, queue != nil)
-		drainer := NewDrainer(store, engine, r2, queue)
+	if d1 != nil || queue != nil {
+		log.Printf("drainer: d1=%v queue=%v", d1 != nil, queue != nil)
+		drainer := NewDrainer(store, engine, d1, queue)
 		go drainer.Run(ctx)
 	}
 
