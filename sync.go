@@ -91,8 +91,11 @@ func (s *Syncer) Sync(ctx context.Context, folder string) error {
 	allowTrigger := last > 0 || s.primed
 	s.primed = true
 
-	// Nothing new.
-	if mbox.Messages == 0 || mbox.UidNext == 0 || last >= mbox.UidNext {
+	// Nothing new. UidNext is the next UID the server will assign, so the
+	// highest existing UID is UidNext-1; comparing last >= UidNext would let a
+	// last==UidNext-1 mailbox through and re-fetch/re-trigger the newest
+	// message on every tick.
+	if mbox.Messages == 0 || mbox.UidNext == 0 || last+1 >= mbox.UidNext {
 		return nil
 	}
 
