@@ -43,11 +43,6 @@ func main() {
 		maxFetch = 500
 	}
 
-	syncer := NewSyncer(store, host, getenv("IMAP_PORT", "993"),
-		os.Getenv("IMAP_USERNAME"), pass, interval, maxFetch)
-	forwarder := NewForwarder()
-	srv := &Server{store: store, syncer: syncer, forwarder: forwarder}
-
 	// Rule engine: declarative rules that trigger Hermes sessions on ingest.
 	engine := NewRuleEngine(
 		getenv("HERMES_WEBHOOK_URL", ""),
@@ -56,6 +51,11 @@ func main() {
 	if err := engine.LoadRules(getenv("RULES_PATH", "/config/rules.yaml")); err != nil {
 		log.Printf("WARN: rules not loaded: %v", err)
 	}
+
+	syncer := NewSyncer(store, host, getenv("IMAP_PORT", "993"),
+		os.Getenv("IMAP_USERNAME"), pass, interval, maxFetch, engine)
+	forwarder := NewForwarder()
+	srv := &Server{store: store, syncer: syncer, forwarder: forwarder}
 	srv.rules = engine
 
 	// Background sync loop.

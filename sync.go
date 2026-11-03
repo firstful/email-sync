@@ -20,14 +20,19 @@ type Syncer struct {
 	password string
 	interval time.Duration
 	maxFetch uint32
+	// rules fires Hermes-session triggers for newly synced mail (metadata-only).
+	rules *RuleEngine
+	// primed is set after the first successful SELECT so the initial backfill
+	// is stored without firing a trigger per historical message.
+	primed bool
 	// inFlight guard: only one sync at a time (sync endpoint + ticker).
 	busy chan struct{}
 }
 
-func NewSyncer(st *Store, host, port, user, pass string, interval time.Duration, maxFetch uint32) *Syncer {
+func NewSyncer(st *Store, host, port, user, pass string, interval time.Duration, maxFetch uint32, rules *RuleEngine) *Syncer {
 	return &Syncer{
 		store: st, host: host, port: port, username: user, password: pass,
-		interval: interval, maxFetch: maxFetch, busy: make(chan struct{}, 1),
+		interval: interval, maxFetch: maxFetch, rules: rules, busy: make(chan struct{}, 1),
 	}
 }
 
@@ -80,6 +85,11 @@ func (s *Syncer) Sync(ctx context.Context, folder string) error {
 	if err != nil {
 		return err
 	}
+	// The very first sync on an empty DB is a backfill: store it, but do not
+	// fire a rule per historical message. Mark primed now so every later sync
+	// (including after a restart, once last > 0) triggers normally.
+	allowTrigger := last > 0 || s.primed
+	s.primed = true
 
 	// Nothing new.
 	if mbox.Messages == 0 || mbox.UidNext == 0 || last >= mbox.UidNext {
@@ -129,6 +139,11 @@ func (s *Syncer) Sync(ctx context.Context, folder string) error {
 		if err := s.store.Upsert(m); err != nil {
 			log.Printf("store uid=%d: %v", msg.Uid, err)
 			continue
+		}
+		// Rule engine: metadata-only dispatch, parity with the ingest path.
+		// Trigger payloads carry envelope only; the body stays in the store.
+		if allowTrigger && s.rules != nil {
+			s.rules.Dispatch(m)
 		}
 		n++
 	}
