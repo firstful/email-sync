@@ -103,7 +103,7 @@ func (e *RuleEngine) LoadRules(path string) error {
 		}
 		prompt := r.Action.Prompt
 		if prompt == "" {
-			prompt = "Inbound email {{.EmailID}} matched rule {{.Name}} (from {{.From}}). Read it via the mail MCP tool and act as appropriate."
+			prompt = "Inbound email {{.EmailID}} matched rule {{.Name}} (from {{.From}}, to {{.To}}). Read it via the mail MCP tool and act as appropriate."
 		}
 		tpl, err := template.New("prompt").Parse(prompt)
 		if err != nil {
@@ -157,14 +157,15 @@ func (e *RuleEngine) fire(cr compiledRule, m *Message) {
 		EmailID uint32
 		From    string
 		Subject string
-	}{cr.rule.Name, m.UID, sanitizeHeader(m.FromAddr), sanitizeHeader(m.Subject)}
+		To      string
+	}{cr.rule.Name, m.UID, sanitizeHeader(m.FromAddr), sanitizeHeader(m.Subject), sanitizeHeader(m.To)}
 	var buf bytes.Buffer
 	if err := cr.promptTpl.Execute(&buf, data); err != nil {
 		log.Printf("rule %q: prompt render: %v", cr.rule.Name, err)
 		return
 	}
 	payload := triggerPayload{
-		Input: fmt.Sprintf("[inbound email #%d from %s subject %q] %s", m.UID, data.From, data.Subject, buf.String()),
+		Input: fmt.Sprintf("[inbound email #%d from %s to %s subject %q] %s", m.UID, data.From, data.To, data.Subject, buf.String()),
 	}
 	body, _ := json.Marshal(payload)
 	url := strings.TrimRight(e.webhook, "/") + "/v1/runs"
