@@ -21,9 +21,10 @@ import (
 type Rule struct {
 	Name  string `yaml:"name"`
 	Match struct {
-		From    string `yaml:"from"`    // regex, matched against envelope from_addr
-		To      string `yaml:"to"`      // regex, matched against to_addr
-		Subject string `yaml:"subject"` // regex, matched against subject
+		From        string `yaml:"from"`         // regex, matched against envelope from_addr
+		To          string `yaml:"to"`           // regex, matched against to_addr
+		Subject     string `yaml:"subject"`      // regex, matched against subject
+		RequireAuth bool   `yaml:"require_auth"` // when true, require DMARC pass aligned with From, stamped by the trusted MX
 	} `yaml:"match"`
 	Action struct {
 		Type    string `yaml:"type"` // "session" (only type today)
@@ -42,12 +43,17 @@ type RulesConfig struct {
 // the session pulls content via the mail_* MCP tool — untrusted email content
 // never rides in the trigger payload.
 type RuleEngine struct {
-	mu      sync.RWMutex
-	rules   []compiledRule
-	webhook string // Hermes API server trigger URL
-	token   string // webhook auth token
-	client  *http.Client
+	mu           sync.RWMutex
+	rules        []compiledRule
+	webhook      string // Hermes API server trigger URL
+	token        string // webhook auth token
+	client       *http.Client
+	authResolver string // authserv-id trusted for DMARC results (AUTH_TRUSTED_RESOLVER)
 }
+
+// defaultAuthResolver is the authserv-id our receiving MX stamps into the
+// Authentication-Results header on every inbound message. Override via env.
+const defaultAuthResolver = "mx.cloudflare.net"
 
 type compiledRule struct {
 	rule      Rule
@@ -57,11 +63,15 @@ type compiledRule struct {
 	promptTpl *template.Template
 }
 
-func NewRuleEngine(webhook, token string) *RuleEngine {
+func NewRuleEngine(webhook, token, authResolver string) *RuleEngine {
+	if authResolver == "" {
+		authResolver = defaultAuthResolver
+	}
 	return &RuleEngine{
-		webhook: webhook,
-		token:   token,
-		client:  &http.Client{Timeout: 10 * time.Second},
+		webhook:      webhook,
+		token:        token,
+		client:       &http.Client{Timeout: 10 * time.Second},
+		authResolver: authResolver,
 	}
 }
 
@@ -120,12 +130,21 @@ func (e *RuleEngine) LoadRules(path string) error {
 }
 
 // Dispatch evaluates one ingested message against all rules; matches fire async.
+// Rules with match.require_auth are hard-gated on a DMARC pass from the trusted
+// receiving MX, aligned with the From domain. This check happens in Go against
+// the stored RFC822 — before any webhook is sent — so email content cannot
+// spoof authorization.
 func (e *RuleEngine) Dispatch(m *Message) {
 	e.mu.RLock()
 	rules := e.rules
 	e.mu.RUnlock()
 	for _, cr := range rules {
 		if !cr.matches(m) {
+			continue
+		}
+		if cr.rule.Match.RequireAuth && !authVerifiedSender(m.Raw, m.FromAddr, e.authResolver) {
+			log.Printf("rule %q: auth gate DENIED for email #%d from %s (no aligned %s DMARC pass)",
+				cr.rule.Name, m.UID, sanitizeHeader(m.FromAddr), e.authResolver)
 			continue
 		}
 		go e.fire(cr, m)

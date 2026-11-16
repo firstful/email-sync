@@ -47,6 +47,7 @@ func main() {
 	engine := NewRuleEngine(
 		getenv("HERMES_WEBHOOK_URL", ""),
 		os.Getenv("HERMES_WEBHOOK_TOKEN"),
+		getenv("AUTH_TRUSTED_RESOLVER", defaultAuthResolver),
 	)
 	if err := engine.LoadRules(getenv("RULES_PATH", "/config/rules.yaml")); err != nil {
 		log.Printf("WARN: rules not loaded: %v", err)
